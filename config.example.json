@@ -1,0 +1,6 @@
+{
+  "port": 18802,
+  "refreshEnabled": true,
+  "refreshThresholdMinutes": 2,
+  "refreshRetrySeconds": 15
+}

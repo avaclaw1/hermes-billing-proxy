@@ -1,0 +1,5 @@
+debug_*.txt
+debug_*.json
+config.json
+node_modules/
+.env
