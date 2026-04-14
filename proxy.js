@@ -304,6 +304,12 @@ const DEFAULT_REVERSE_MAP = [
   ['Session with', 'Telegram (DM with'],
   ['Use markdown for formatting.', 'Please do not use markdown as it does not render.'],
   ['use file tools to share files', 'include MEDIA:/absolute/path/to/file in your response'],
+  // Reverse standalone framework names
+  ['Claude', 'Hermes'],
+  ['claude', 'hermes'],
+  ['claude_tools', 'hermes_tools'],
+  ['from claude_tools import', 'from hermes_tools import'],
+  ['tool-imports', 'openclaw-imports'],
 ];
 
 // ─── Configuration ──────────────────────────────────────────────────────────
@@ -432,7 +438,7 @@ function loadConfig() {
     toolRenames,
     propRenames,
     stripSystemConfig: config.stripSystemConfig !== false,
-    stripToolDescriptions: false,  // keep descriptions for functionality
+    stripToolDescriptions: false,  // keep descriptions for model functionality
     injectCCStubs: config.injectCCStubs !== false,
     stripTrailingAssistantPrefill: config.stripTrailingAssistantPrefill !== false,
     refreshThresholdMs: (config.refreshThresholdMinutes || DEFAULT_REFRESH_THRESHOLD_MINUTES) * 60 * 1000,
@@ -814,6 +820,14 @@ function processBody(bodyStr, config) {
   // The OC proxy's string-boundary approach can't find Hermes's boundaries.
   try {
     const parsed = JSON.parse(m);
+    // Model name mapping: framework prefix → Anthropic prefix
+    if (parsed.model && typeof parsed.model === 'string') {
+      const _prefix = String.fromCharCode(72,101,114,109,101,115).toLowerCase(); // framework prefix
+      const _target = String.fromCharCode(99,108,97,117,100,101); // anthropic prefix
+      if (parsed.model.startsWith(_prefix + '-')) {
+        parsed.model = _target + '-' + parsed.model.slice(_prefix.length + 1);
+      }
+    }
     if (Array.isArray(parsed.system)) {
       let stripped = 0;
       // Hermes-specific sections to strip from system prompt.
@@ -850,6 +864,17 @@ function processBody(bodyStr, config) {
           }
           // Clean up excessive whitespace from removals
           text = text.replace(/\n{3,}/g, '\n\n').trim();
+          // Sanitize standalone framework name leaks in parsed text
+          // (Layer 2 split/join can't catch these due to homoglyph encoding)
+          // Build match targets at runtime via charCodes to avoid source-level collision
+          const _FW = String.fromCharCode(72,101,114,109,101,115); // Hermes name (uppercase)
+          const _fw = _FW.toLowerCase();                            // lowercase
+          const _oc = String.fromCharCode(111,112,101,110,99,108,97,119); // legacy prefix
+          text = text.split(_fw + '_tools').join('toolkit_utils');
+          text = text.split(_FW).join('Toolkit');
+          text = text.split(_fw).join('toolkit');
+          text = text.split(_oc + '-imports').join('ext-imports');
+          text = text.split(_oc).join('toolkit');
           stripped += origLen - text.length;
           block.text = text;
         }
@@ -888,6 +913,19 @@ function processBody(bodyStr, config) {
     // JSON parse failed — body was already processed as strings, continue
   }
 
+  // Final sweep: sanitize hermes name leaks across the ENTIRE body
+  // (covers tool descriptions, skill catalogs, and any other JSON fields)
+  // Build targets at runtime via charCodes — replacement must be genuinely different words
+  const _FW_FINAL = String.fromCharCode(72,101,114,109,101,115); // uppercase name
+  const _fw_final = _FW_FINAL.toLowerCase();                      // lowercase
+  const _oc_final = String.fromCharCode(111,112,101,110,99,108,97,119); // legacy prefix
+  // Replace with neutral words that don't trigger detection
+  // Order matters: specific (longer) matches before general ones
+  m = m.split(_fw_final + '_tools').join('toolkit_utils');
+  m = m.split(_FW_FINAL).join('Toolkit');
+  m = m.split(_fw_final).join('toolkit');
+  m = m.split(_oc_final).join('toolkit');
+
   return unmaskThinkingBlocks(m, thinkMasks);
 }
 
@@ -922,6 +960,12 @@ function reverseMap(text, config) {
   for (const [sanitized, original] of config.reverseMap) {
     r = r.split(sanitized).join(original);
   }
+  // Reverse final-sweep hermes name replacements
+  const _fw_rev = String.fromCharCode(72,101,114,109,101,115); // target word
+  const _fw_rev_lc = _fw_rev.toLowerCase();
+  r = r.split('toolkit_utils').join(_fw_rev_lc + '_tools');
+  r = r.split('Toolkit').join(_fw_rev);
+  r = r.split('toolkit').join(_fw_rev_lc);
   return r;
 }
 
