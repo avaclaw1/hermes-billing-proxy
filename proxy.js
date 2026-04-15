@@ -1004,6 +1004,19 @@ function startServer(config) {
       return;
     }
 
+    // /v1/models and /models — return supported model list so callers
+    // can discover context-window sizes instead of falling back to 128K.
+    if ((req.url === '/v1/models' || req.url === '/models') && req.method === 'GET') {
+      const models = [
+        { id: 'hermes-opus-4-6',   object: 'model', owned_by: 'anthropic', context_length: 1000000 },
+        { id: 'hermes-sonnet-4-6', object: 'model', owned_by: 'anthropic', context_length: 1000000 },
+        { id: 'hermes-haiku-4-5',  object: 'model', owned_by: 'anthropic', context_length: 200000  },
+      ];
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ object: 'list', data: models }));
+      return;
+    }
+
     requestCount++;
     const reqNum = requestCount;
     const chunks = [];
