@@ -308,9 +308,6 @@ const DEFAULT_REVERSE_MAP = [
   // Reverse standalone framework names
   ['Claude', 'Hermes'],
   ['claude', 'hermes'],
-  ['claude_tools', 'hermes_tools'],
-  ['from claude_tools import', 'from hermes_tools import'],
-  ['tool-imports', 'openclaw-imports'],
 ];
 
 // ─── Configuration ──────────────────────────────────────────────────────────
@@ -594,15 +591,17 @@ function processBody(bodyStr, config) {
   const { masked: maskedBody, masks: thinkMasks } = maskThinkingBlocks(bodyStr);
   let m = maskedBody;
 
-  // Debug: dump raw system prompt
-  const fs = require('fs');
-  try {
-    const _p = JSON.parse(m);
-    if (Array.isArray(_p.system)) {
-      const sysDump = _p.system.map((b,i) => `=== BLOCK ${i} (${(b.text||'').length} chars) ===\n${b.text||''}`).join('\n\n');
-      if (sysDump.length > 1000) fs.writeFileSync(require('path').join(__dirname, 'debug_system_prompt.txt'), sysDump);
-    }
-  } catch(e) {}
+  // Debug: dump raw system prompt (gated — opt in with DEBUG_DUMPS=1)
+  if (process.env.DEBUG_DUMPS) {
+    const fs = require('fs');
+    try {
+      const _p = JSON.parse(m);
+      if (Array.isArray(_p.system)) {
+        const sysDump = _p.system.map((b,i) => `=== BLOCK ${i} (${(b.text||'').length} chars) ===\n${b.text||''}`).join('\n\n');
+        if (sysDump.length > 1000) fs.writeFileSync(require('path').join(__dirname, 'debug_system_prompt.txt'), sysDump);
+      }
+    } catch(e) {}
+  }
 
   // Layer 2: String trigger sanitization (global split/join)
   for (const [find, replace] of config.replacements) {
@@ -918,18 +917,11 @@ function processBody(bodyStr, config) {
     // JSON parse failed — body was already processed as strings, continue
   }
 
-  // Final sweep: sanitize hermes name leaks across the ENTIRE body
-  // (covers tool descriptions, skill catalogs, and any other JSON fields)
-  // Build targets at runtime via charCodes — replacement must be genuinely different words
-  const _FW_FINAL = String.fromCharCode(72,101,114,109,101,115); // uppercase name
-  const _fw_final = _FW_FINAL.toLowerCase();                      // lowercase
-  const _oc_final = String.fromCharCode(111,112,101,110,99,108,97,119); // legacy prefix
-  // Replace with neutral words that don't trigger detection
-  // Order matters: specific (longer) matches before general ones
-  m = m.split(_fw_final + '_tools').join('toolkit_utils');
-  m = m.split(_FW_FINAL).join('Toolkit');
-  m = m.split(_fw_final).join('toolkit');
-  m = m.split(_oc_final).join('toolkit');
+  // Final sweep removed: the blanket hermes/openclaw -> toolkit replacement
+  // corrupted responses because the reverse (toolkit -> hermes) caught any
+  // legitimate "toolkit" reference in model output ("Redux Toolkit",
+  // "Python toolkit", etc.) and turned it into "hermes". Precise identity
+  // hiding is handled by DEFAULT_REPLACEMENTS above.
 
   return unmaskThinkingBlocks(m, thinkMasks);
 }
@@ -965,12 +957,7 @@ function reverseMap(text, config) {
   for (const [sanitized, original] of config.reverseMap) {
     r = r.split(sanitized).join(original);
   }
-  // Reverse final-sweep hermes name replacements
-  const _fw_rev = String.fromCharCode(72,101,114,109,101,115); // target word
-  const _fw_rev_lc = _fw_rev.toLowerCase();
-  r = r.split('toolkit_utils').join(_fw_rev_lc + '_tools');
-  r = r.split('Toolkit').join(_fw_rev);
-  r = r.split('toolkit').join(_fw_rev_lc);
+  // Reverse final-sweep removed (see outbound counterpart for rationale).
   return r;
 }
 
@@ -1081,11 +1068,13 @@ function startServer(config) {
             let errBody = Buffer.concat(errChunks).toString();
             if (errBody.includes('extra usage')) {
               console.error(`[${ts}] #${reqNum} DETECTION! Body: ${body.length}b`);
-              // Dump processed body for debugging
-              const fs = require('fs');
-              const debugPath = require('path').join(__dirname, `debug_detect_${reqNum}.txt`);
-              try { fs.writeFileSync(debugPath, bodyStr); } catch(e) {}
-              console.error(`[${ts}] #${reqNum} Body dumped to ${debugPath}`);
+              // Dump processed body for debugging (gated — opt in with DEBUG_DUMPS=1)
+              if (process.env.DEBUG_DUMPS) {
+                const fs = require('fs');
+                const debugPath = require('path').join(__dirname, `debug_detect_${reqNum}.txt`);
+                try { fs.writeFileSync(debugPath, bodyStr); } catch(e) {}
+                console.error(`[${ts}] #${reqNum} Body dumped to ${debugPath}`);
+              }
             }
             errBody = reverseMap(errBody, config);
             const nh = { ...upRes.headers };
