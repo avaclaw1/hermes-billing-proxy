@@ -846,6 +846,10 @@ function processBody(bodyStr, config) {
          '# Fact Store\nUse fact_store to record important facts. Use fact_feedback to rate them.\n\n'],
         [/## Skills \(mandatory\)\nBefore replying[\s\S]*?update it before finishing\.\n/,
          '## Workflows\nScan skills below before replying. If a skill matches the task, you MUST load it with skill_view(name). Skills have tested commands and proven workflows that outperform raw API calls — always prefer them. Fix broken ones with skill_manage(action=patch).\n'],
+        // Cron prompt boilerplate (different structure from interactive session)
+        /Save durable info via memory tool between chats[\s\S]*?(?=\n<available_skills>|$)/,
+        /You have persistent memory across sessions[\s\S]*?(?=\n<available_skills>|\n══|$)/,
+        /## Workflows\nScan skills below[^\n]*\n[^\n]*skill_view[^\n]*\n[^\n]*skill_manage[^\n]*/,
         // CLI footer
         /\nConversation started:[^\n]*\nModel:[^\n]*\nProvider:[^\n]*\n?/,
         /\nYou are a CLI AI Agent[^\n]*/,
@@ -1009,7 +1013,7 @@ function startServer(config) {
     // can discover context-window sizes instead of falling back to 128K.
     if ((req.url === '/v1/models' || req.url === '/models') && req.method === 'GET') {
       const models = [
-        { id: 'hermes-opus-4-6',   object: 'model', owned_by: 'anthropic', context_length: 1000000 },
+        { id: 'hermes-opus-4-7',   object: 'model', owned_by: 'anthropic', context_length: 1000000 },
         { id: 'hermes-sonnet-4-6', object: 'model', owned_by: 'anthropic', context_length: 1000000 },
         { id: 'hermes-haiku-4-5',  object: 'model', owned_by: 'anthropic', context_length: 200000  },
       ];
