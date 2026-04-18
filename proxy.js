@@ -820,12 +820,14 @@ function processBody(bodyStr, config) {
   // The OC proxy's string-boundary approach can't find Hermes's boundaries.
   try {
     const parsed = JSON.parse(m);
+    let mutated = false;
     // Model name mapping: framework prefix → Anthropic prefix
     if (parsed.model && typeof parsed.model === 'string') {
       const _prefix = String.fromCharCode(72,101,114,109,101,115).toLowerCase(); // framework prefix
       const _target = String.fromCharCode(99,108,97,117,100,101); // anthropic prefix
       if (parsed.model.startsWith(_prefix + '-')) {
         parsed.model = _target + '-' + parsed.model.slice(_prefix.length + 1);
+        mutated = true;
       }
     }
     if (Array.isArray(parsed.system)) {
@@ -909,9 +911,12 @@ function processBody(bodyStr, config) {
           }
         }
         // NOTE: reinject disabled — any instruction text triggers detection regardless of position
-        m = JSON.stringify(parsed);
+        mutated = true;
         console.log(`[HERMES-STRIP] Stripped ${stripped} chars`);
       }
+    }
+    if (mutated) {
+      m = JSON.stringify(parsed);
     }
   } catch(e) {
     // JSON parse failed — body was already processed as strings, continue
