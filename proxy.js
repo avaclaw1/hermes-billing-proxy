@@ -165,6 +165,8 @@ function getStainlessHeaders() {
 // IMPORTANT: Use space-free replacements for lowercase 'openclaw' to avoid
 // breaking filesystem paths (e.g., .openclaw/ -> .ocplatform/, not .oc platform/)
 const DEFAULT_REPLACEMENTS = [
+  // Canonicalize prior reverse-map corruption BEFORE path sanitization
+  ['.hermes-ws', '.claude-ws'],
   ['Hermes Agent', 'Claude Code'],
   ['hermes agent', 'claude code'],
   ['hermes-agent', 'claude-code'],
@@ -186,7 +188,6 @@ const DEFAULT_REPLACEMENTS = [
   ['hermes_cli', 'claude_cli'],
   ['HERMES_PLATFORM', 'CLAUDE_PLATFORM'],
   ['HERMES_SESSION_PLATFORM', 'CLAUDE_SESSION_PLATFORM'],
-  ['holographic', 'persistent'],
   ['NousResearch', 'AnthropicAI'],
   // Platform/messaging hints (Telegram gateway fingerprint)
   ['You are on a text messaging communication platform, Telegram.', 'You are in an interactive CLI session.'],
@@ -283,6 +284,7 @@ const DEFAULT_REVERSE_MAP = [
   ['CLAUDE_HOME', 'HERMES_HOME'],
   ['claude_home', 'hermes_home'],
   ['.claude-ws/', '.hermes/'],
+  ['.claude-ws', '.hermes'],
   ['.claude.md', '.hermes.md'],
   ['CLAUDE.md', 'HERMES.md'],
   ['claude setup', 'hermes setup'],
@@ -295,7 +297,6 @@ const DEFAULT_REVERSE_MAP = [
   ['claude_cli', 'hermes_cli'],
   ['CLAUDE_PLATFORM', 'HERMES_PLATFORM'],
   ['CLAUDE_SESSION_PLATFORM', 'HERMES_SESSION_PLATFORM'],
-  ['persistent', 'holographic'],
   ['AnthropicAI', 'NousResearch'],
   // Reverse platform hints  
   ['You are in an interactive CLI session.', 'You are on a text messaging communication platform, Telegram.'],
