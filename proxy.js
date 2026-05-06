@@ -165,8 +165,6 @@ function getStainlessHeaders() {
 // IMPORTANT: Use space-free replacements for lowercase 'openclaw' to avoid
 // breaking filesystem paths (e.g., .openclaw/ -> .ocplatform/, not .oc platform/)
 const DEFAULT_REPLACEMENTS = [
-  // Canonicalize prior reverse-map corruption BEFORE path sanitization
-  ['.hermes-ws', '.claude-ws'],
   ['Hermes Agent', 'Claude Code'],
   ['hermes agent', 'claude code'],
   ['hermes-agent', 'claude-code'],
@@ -1004,10 +1002,18 @@ function startServer(config) {
     // /v1/models and /models — return supported model list so callers
     // can discover context-window sizes instead of falling back to 128K.
     if ((req.url === '/v1/models' || req.url === '/models') && req.method === 'GET') {
+      // Advertise both `hermes-*` (legacy aliases) and `claude-*` (real
+      // upstream names) so the host can discover correct context_length
+      // regardless of which naming the config.yaml uses. The outbound
+      // path-rewrite at line 828 maps hermes-* → claude-* before the
+      // request leaves the proxy, so both forms route identically.
       const models = [
-        { id: 'hermes-opus-4-7',   object: 'model', owned_by: 'anthropic', context_length: 1000000 },
-        { id: 'hermes-sonnet-4-6', object: 'model', owned_by: 'anthropic', context_length: 1000000 },
-        { id: 'hermes-haiku-4-5',  object: 'model', owned_by: 'anthropic', context_length: 200000  },
+        { id: 'hermes-opus-4-7',    object: 'model', owned_by: 'anthropic', context_length: 1000000 },
+        { id: 'hermes-sonnet-4-6',  object: 'model', owned_by: 'anthropic', context_length: 1000000 },
+        { id: 'hermes-haiku-4-5',   object: 'model', owned_by: 'anthropic', context_length: 200000  },
+        { id: 'claude-opus-4-7',    object: 'model', owned_by: 'anthropic', context_length: 1000000 },
+        { id: 'claude-sonnet-4-6',  object: 'model', owned_by: 'anthropic', context_length: 1000000 },
+        { id: 'claude-haiku-4-5',   object: 'model', owned_by: 'anthropic', context_length: 200000  },
       ];
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ object: 'list', data: models }));
@@ -1055,7 +1061,12 @@ function startServer(config) {
       const existingBeta = headers['anthropic-beta'] || '';
       const betas = existingBeta ? existingBeta.split(',').map(b => b.trim()) : [];
       for (const b of REQUIRED_BETAS) { if (!betas.includes(b)) betas.push(b); }
-      headers['anthropic-beta'] = betas.join(',');
+      // Max-subscription OAuth doesn't include 1M context access; the header
+      // 400s on models without 1M (haiku-4-5) and is a no-op on models where
+      // 1M is GA (opus-4-6/4-7, sonnet-4-6 on api.anthropic.com). Claude Code
+      // itself never sends it on OAuth — match that.
+      const filteredBetas = betas.filter(b => b !== 'context-1m-2025-08-07');
+      headers['anthropic-beta'] = filteredBetas.join(',');
 
       const ts = new Date().toISOString().substring(11, 19);
       console.log(`[${ts}] #${reqNum} ${req.method} ${req.url} (${originalSize}b -> ${body.length}b)`);
@@ -1067,6 +1078,28 @@ function startServer(config) {
         const status = upRes.statusCode;
         console.log(`[${ts}] #${reqNum} > ${status}`);
         if (status !== 200 && status !== 201) {
+          // Log rate-limit / quota headers on every non-2xx so we can diagnose
+          // parallel-fan-out failures (Max-plan accounting, acceleration limits,
+          // 5h-window utilization, etc). Headers are filtered to the relevant
+          // prefixes to keep the log line readable.
+          const rlHeaders = {};
+          for (const [k, v] of Object.entries(upRes.headers || {})) {
+            const lk = k.toLowerCase();
+            if (
+              lk.startsWith('anthropic-ratelimit-') ||
+              lk.startsWith('anthropic-priority-') ||
+              lk.startsWith('anthropic-fast-') ||
+              lk === 'retry-after' ||
+              lk === 'x-should-retry' ||
+              lk === 'request-id' ||
+              lk === 'anthropic-organization-id'
+            ) {
+              rlHeaders[lk] = v;
+            }
+          }
+          if (Object.keys(rlHeaders).length > 0) {
+            console.error(`[${ts}] #${reqNum} headers: ${JSON.stringify(rlHeaders)}`);
+          }
           const errChunks = [];
           upRes.on('data', c => errChunks.push(c));
           upRes.on('end', () => {
@@ -1093,6 +1126,13 @@ function startServer(config) {
         // SSE streaming — event-aware reverseMap with thinking block passthrough.
         // Buffer until complete SSE events (terminated by \n\n), then transform per
         // event. Thinking/redacted_thinking blocks pass through unchanged.
+        //
+        // Tool_use blocks: their `input_json_delta` events fragment argument strings
+        // across multiple chunks, so a rewrite target like `.claude-ws/` can span two
+        // events and be missed by per-event reverseMap. We buffer all events for an
+        // active tool_use block and run reverseMap over the concatenated payload at
+        // content_block_stop, then emit atomically. Per-tool streaming latency is
+        // unchanged from the client's perspective (it doesn't execute until stop).
         if (upRes.headers['content-type'] && upRes.headers['content-type'].includes('text/event-stream')) {
           const sseHeaders = { ...upRes.headers };
           delete sseHeaders['content-length'];
@@ -1101,6 +1141,8 @@ function startServer(config) {
           const decoder = new StringDecoder('utf8');
           let pending = '';
           let currentBlockIsThinking = false;
+          // { index: N, events: [...] } while a tool_use block is in flight; else null
+          let toolUseBuffer = null;
 
           const transformEvent = (event) => {
             let dataIdx = event.startsWith('data: ') ? 0 : event.indexOf('\ndata: ');
@@ -1111,6 +1153,12 @@ function startServer(config) {
               ? event.slice(dataIdx + 6)
               : event.slice(dataIdx + 6, dataLineEnd);
 
+            // First "index":N in the top-level JSON identifies which content block
+            // the event belongs to. Safe because Anthropic places it before any
+            // nested JSON in delta bodies.
+            const idxMatch = dataStr.match(/"index":(\d+)/);
+            const evtIndex = idxMatch ? parseInt(idxMatch[1], 10) : null;
+
             if (dataStr.indexOf('"type":"content_block_start"') !== -1) {
               if (dataStr.indexOf('"content_block":{"type":"thinking"') !== -1 ||
                   dataStr.indexOf('"content_block":{"type":"redacted_thinking"') !== -1) {
@@ -1118,14 +1166,55 @@ function startServer(config) {
                 return event;
               }
               currentBlockIsThinking = false;
+              // Tool_use block: start buffering so fragmented arg strings get
+              // rewritten across delta boundaries.
+              if (dataStr.indexOf('"content_block":{"type":"tool_use"') !== -1) {
+                toolUseBuffer = { index: evtIndex, events: [event] };
+                return '';
+              }
               return reverseMap(event, config);
             }
             if (dataStr.indexOf('"type":"content_block_stop"') !== -1) {
               const wasThinking = currentBlockIsThinking;
               currentBlockIsThinking = false;
+              // Flush tool_use buffer if this stops our block.
+              // Concat EVENTS directly fails because JSON/SSE structural bytes
+              // (`"}}\n\ndata: {…"partial_json":"`) sit between the partial_json
+              // values in the concatenated events — a target like `.claude-ws/`
+              // split across deltas won't be contiguous. Instead, extract each
+              // delta's partial_json string value, concat only those values,
+              // apply reverseMap, and emit a single synthesized delta.
+              if (toolUseBuffer && toolUseBuffer.index === evtIndex) {
+                const startEvent = toolUseBuffer.events[0];
+                const deltaEvents = toolUseBuffer.events.slice(1);
+                toolUseBuffer = null;
+                const PARTIAL_RE = /"partial_json":"((?:[^"\\]|\\.)*)"/;
+                const assembled = deltaEvents.map(e => {
+                  const m = e.match(PARTIAL_RE);
+                  return m ? m[1] : '';
+                }).join('');
+                const rewritten = reverseMap(assembled, config);
+                // Emit: (start) + (single synth delta carrying full rewritten
+                // arg string) + (stop). The client's accumulator concatenates
+                // partial_json values and JSON-parses on stop, so one delta
+                // with the full payload is semantically identical to N deltas.
+                const synthDelta = 'event: content_block_delta\ndata: ' +
+                  '{"type":"content_block_delta","index":' + evtIndex +
+                  ',"delta":{"type":"input_json_delta","partial_json":"' +
+                  rewritten + '"}}\n\n';
+                return reverseMap(startEvent, config) +
+                       synthDelta +
+                       reverseMap(event, config);
+              }
               return wasThinking ? event : reverseMap(event, config);
             }
             if (currentBlockIsThinking) return event;
+            // Buffer deltas belonging to the active tool_use block.
+            if (toolUseBuffer && evtIndex === toolUseBuffer.index &&
+                dataStr.indexOf('"type":"content_block_delta"') !== -1) {
+              toolUseBuffer.events.push(event);
+              return '';
+            }
             return reverseMap(event, config);
           };
 
@@ -1142,6 +1231,14 @@ function startServer(config) {
             pending += decoder.end();
             if (pending.length > 0) {
               res.write(transformEvent(pending));
+            }
+            // Stream closed mid tool_use (upstream error or truncation):
+            // flush what we have so the client sees the partial rather than
+            // nothing. Apply reverseMap in case any complete rewrite targets
+            // exist in the buffered prefix.
+            if (toolUseBuffer && toolUseBuffer.events.length > 0) {
+              res.write(reverseMap(toolUseBuffer.events.join(''), config));
+              toolUseBuffer = null;
             }
             res.end();
           });
