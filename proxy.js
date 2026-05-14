@@ -36,6 +36,15 @@ const DEFAULT_PORT = 18802;
 const UPSTREAM_HOST = 'api.anthropic.com';
 const VERSION = '2.2.3';
 
+// Reuse a pool of TLS connections to Anthropic instead of opening a fresh
+// handshake per request. Cuts ~100ms off each call and prevents TIME_WAIT
+// socket pile-up under load (cron fan-out, parallel tool calls, etc).
+const UPSTREAM_AGENT = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 32,
+});
+
 // Claude Code version to emulate (update when new CC versions are released)
 const CC_VERSION = '2.1.97';
 
@@ -1073,7 +1082,8 @@ function startServer(config) {
 
       const upstream = https.request({
         hostname: UPSTREAM_HOST, port: 443,
-        path: req.url, method: req.method, headers
+        path: req.url, method: req.method, headers,
+        agent: UPSTREAM_AGENT
       }, (upRes) => {
         const status = upRes.statusCode;
         console.log(`[${ts}] #${reqNum} > ${status}`);
